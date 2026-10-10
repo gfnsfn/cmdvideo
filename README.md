@@ -436,14 +436,17 @@ cmdvideo --window "关键字" --project-fps 15
     --windowed --name cmdvideo --distpath dist --workpath .build312\build ^
     --specpath .build312 cmdvideo.py
 
-:: 2. 重新生成安装包
-"C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe" cmdvideo_setup.iss
+:: 2. 重新生成安装包（ISCC.exe 是 Inno Setup 6 自带的编译器，
+::    一般在 %LOCALAPPDATA%\Programs\Inno Setup 6\ 或 C:\Program Files (x86)\Inno Setup 6\）
+"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" cmdvideo_setup.iss
 ```
 
 产物在 `installer_out\cmdvideo_setup.exe`。
 
 安装包配置都在 `cmdvideo_setup.iss` 里（Inno Setup 6 脚本），
-包括安装路径、快捷方式、卸载项、文件关联。
+包括安装路径、快捷方式、卸载项、文件关联。注意安装包会把 `ffmpeg.exe`
+一起装到 `{app}` —— 播放功能依赖它，单把 `cmdvideo.exe` 拷走是不能放视频的
+（程序会明确提示缺 ffmpeg，而不是静默失败）。
 
 ---
 
