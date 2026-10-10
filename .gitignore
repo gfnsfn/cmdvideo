@@ -1,0 +1,37 @@
+# 构建产物 / 打包中间文件
+dist/
+build/
+.build312/
+*.spec
+
+# 虚拟环境
+.venv*/
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 第三方大文件：ffmpeg 是几十 MB 的二进制，不进仓库。
+# 需要的人自己下（或者用安装包里带的那份）。
+ffmpeg.exe
+ffprobe.exe
+
+# 构建产物：exe / 安装包是打包出来的，让 CI 或本地按 README 重新生成，
+# 不把几十 MB 的二进制堆进版本历史。
+cmdvideo.exe
+cmdvideo_setup.exe
+installer_out/
+
+# 备份文件（改 bug 时留的旧 exe / 旧源码）
+*.bak
+*.bak-*
+*.orig
+*~
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
