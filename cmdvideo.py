@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """cmdvideo —— 在 cmd / Windows 终端窗口里播放视频
 
@@ -27,7 +27,7 @@ import time
 APP = "cmdvideo"
 # 版本号：改这里，然后 README 的变更记录和 cmdvideo_setup.iss 里的
 # MyAppVersion 跟着一起改（发 Release 时对得上号）。
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 # 字符画模式的明暗阶梯（从最暗到最亮）。
 # 亮度算出来后按比例取其中一个字符，字符本身的"疏密"就在表现明暗。
@@ -1446,8 +1446,14 @@ class ConsoleInput:
     这样渲染不会被输入阻塞。
     """
 
-    def __init__(self, forward):
+    def __init__(self, forward, console_hwnd=None):
         self.forward = forward
+        # 投屏窗口自己的 hwnd（也就是这个进程的控制台窗口）。
+        # 必须由调用方传进来，不能在这里调 GetConsoleWindow() 现取：
+        # 那个 API 返回的是「本进程当前挂着的控制台」，一旦进程被别的程序
+        # 拉起来、或挂到了别的控制台上，拿到的就是**别人的**窗口句柄 ——
+        # 实测踩过：抢前台抢到了调用方的控制台上，滚轮反而更不灵。
+        self.console_hwnd = console_hwnd
         self.queue = []
         self.stop = threading.Event()
         self.h = None
@@ -1456,6 +1462,15 @@ class ConsoleInput:
         self._thread = None
         self._last_pos = (-1, -1)
         self._buttons = 0
+        # 滚轮余数：攒够一格才转发一次，见 _on_mouse 里的说明
+        self._wheel_acc = 0
+        # 移动限速用：上次投移动的时间、被合并掉的位置（见 _emit_move）
+        self._move_at = 0.0
+        self._move_pending = None
+        # 投屏帧率，由 project() 设进来，用来定「一拍」有多长
+        self.fps = 0.0
+        # 上次把投屏窗口抢回前台的时间（滚动时要用，做节流）
+        self._focus_at = 0.0
 
     def start(self):
         k = ctypes.windll.kernel32
@@ -1507,6 +1522,8 @@ class ConsoleInput:
         while q:
             rec = q.pop(0)
             self._handle(rec)
+        # 一拍处理完，把被合并掉的那个移动补上（见 _emit_move）
+        self._flush_move()
         return self.quit
 
     # ---- 事件处理 ----
@@ -1516,6 +1533,48 @@ class ConsoleInput:
         elif rec.EventType == KEY_EVENT:
             self._on_key(rec.Event.KeyEvent)
 
+    def _wheel_log(self, delta, notches, pos):
+        """CMDVIDEO_DEBUG=1 时记录每次滚轮转发（排查滚轮问题用）。"""
+        if not os.environ.get("CMDVIDEO_DEBUG"):
+            return
+        try:
+            u = ctypes.windll.user32
+            con = self.console_hwnd
+            line = "wheel delta=%d notches=%d cell=%s console_fg=%s fg=%s con=%s\n" % (
+                delta, notches, pos,
+                bool(con) and u.GetForegroundWindow() == con,
+                u.GetForegroundWindow(), con)
+            with open(os.path.join(tempfile.gettempdir(), "cmdvideo_wheel.log"),
+                      "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+
+    def _keep_focus(self):
+        """滚动前确认投屏窗口还在前台。
+
+        为什么要做这件事：控制台的鼠标事件（**包括滚轮**）只有它是前台窗口时
+        才会上报 —— 你先去点了别的窗口，再回来滚投屏，控制台根本收不到滚轮，
+        表现就是「滚轮没法用」。所以真要滚的时候先把窗口抢回前台。
+
+        代价是那一刻别的窗口会失去焦点，所以只在「滚轮真的要转发」时才做
+        （攒够一格才到这里），并做节流，避免连续滚动时反复抢。
+        """
+        try:
+            u = ctypes.windll.user32
+            con = self.console_hwnd
+            if not con or u.GetForegroundWindow() == con:
+                return
+            now = time.perf_counter()
+            if now - self._focus_at < 1.0:
+                return
+            self._focus_at = now
+            # 抢前台可能要几十毫秒，扔后台线程，别卡住这一帧的输入处理
+            threading.Thread(target=self.forward.focus_console,
+                             args=(self.console_hwnd,), daemon=True).start()
+        except Exception:
+            pass
+
     def _on_mouse(self, m):
         pos = (m.dwMousePosition.X, m.dwMousePosition.Y)
         btn = m.dwButtonState
@@ -1524,7 +1583,19 @@ class ConsoleInput:
             delta = (btn >> 16) & 0xFFFF
             if delta >= 0x8000:
                 delta -= 0x10000
-            self.forward.wheel(pos, delta // 120)
+            # 不能写成 delta // 120 就完事：微软的「平滑滚动」和高精度滚轮
+            # 会发比一格(120)小的增量（常见 ±30/±60），整数除直接变成 0
+            # —— 表现就是「投屏时滚轮完全没反应」。这里把余数攒起来，
+            # 攒够一格才发一次（正负分开攒，换方向就清零，免得回头时多蹦一格）。
+            if delta and (delta > 0) != (self._wheel_acc > 0):
+                self._wheel_acc = 0
+            self._wheel_acc += delta
+            notches = int(self._wheel_acc / 120)      # 向零取整
+            if notches:
+                self._wheel_acc -= notches * 120
+                self._keep_focus()
+                self.forward.wheel(pos, notches)
+                self._wheel_log(delta, notches, pos)
             return
         changed = btn ^ self._buttons
         self._buttons = btn
@@ -1545,6 +1616,38 @@ class ConsoleInput:
                 self.forward.button(pos, "middle", False)
         if pos != self._last_pos:
             self._last_pos = pos
+            self._emit_move(pos)
+
+    def _emit_move(self, pos):
+        """把「鼠标移动」投给目标窗口，但**不许把它的消息队列灌满**。
+
+        为什么必须限速（实测出来的坑）：控制台在鼠标快速移动时会一口气上报几百
+        个移动事件，一拍全投出去，目标窗口的队列瞬间堆到两千条。Windows 的窗口
+        消息队列有上限，**超了就直接把新消息丢掉，而且 PostMessage 照样返回成功**
+        —— 后果是别的事件被静默吞掉：滑动一下鼠标，紧接着的滚轮就没了，表现就是
+        「投屏时滚轮没法用」（实验里 1500 条以上开始丢，滚轮首当其冲）。
+
+        所以这里做两件事：
+          1. **合并同一拍里的多次移动**：每拍最多投一条，位置取这拍最后一个。
+             反正中间那些格子目标窗口根本来不及看（一拍 50ms，人眼也看不出差别）。
+          2. **位置没变就别投**：悬停不动时一条都不发，队列始终是空的，
+             点击和滚轮随到随处理。
+        """
+        now = time.perf_counter()
+        # 拍长跟投屏帧率走：20fps ≈ 50ms；没有帧率信息时退回 30ms
+        budget = 1.0 / max(1.0, getattr(self, "fps", 0.0) or 30.0)
+        if now - self._move_at < budget:
+            self._move_pending = pos          # 攒着，等下一拍
+            return
+        self._move_at = now
+        self._move_pending = None
+        self.forward.move(pos)
+
+    def _flush_move(self):
+        """一拍结束时补投那个被合并掉的移动（目标窗口才看得到最终位置）。"""
+        if self._move_pending is not None:
+            pos, self._move_pending = self._move_pending, None
+            self._move_at = time.perf_counter()
             self.forward.move(pos)
 
     def _on_key(self, e):
@@ -1622,8 +1725,17 @@ class WindowControl:
         return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
 
     def _post(self, msg, wparam, lparam):
-        self.u.PostMessageW(self.hwnd, msg, wparam, lparam)
+        ok = self.u.PostMessageW(self.hwnd, msg, wparam, lparam)
         self.sent += 1
+        if not ok and os.environ.get("CMDVIDEO_DEBUG"):
+            try:
+                with open(os.path.join(tempfile.gettempdir(), "cmdvideo_events.log"),
+                          "a", encoding="utf-8") as f:
+                    f.write("POST FAILED msg=0x%x hwnd=%s err=%s\n"
+                            % (msg, self.hwnd, ctypes.get_last_error()))
+            except Exception:
+                pass
+        return ok
 
     def _to_screen(self, x, y):
         pt = _COORD(x, y)
@@ -1718,6 +1830,50 @@ class WindowControl:
             return is_fg()
         except Exception as e:
             self._trace("focus raised %r" % (e,))
+            return False
+
+    def focus_console(self, con=None):
+        """把**投屏窗口自己**（控制台）抢回前台，成功返回 True。
+
+        用途：控制台的鼠标事件（尤其滚轮）只有它是前台窗口时才上报。用户先
+        去点了别的窗口，再回来滚投屏，滚轮就会被系统丢掉 —— 所以真正要滚
+        的时候先把窗口抢回来。手法和 focus() 一样（借前台线程的输入队列 +
+        模拟一次 Alt），只是目标换成我们自己的控制台窗口。
+
+        con 必须由调用方给出：不能用 GetConsoleWindow() 现取 —— 那个 API 返回
+        「本进程当前挂着的控制台」，进程被别的程序拉起来时会拿到调用方的窗口，
+        抢前台就抢错了对象。
+        """
+        try:
+            k = ctypes.windll.kernel32
+            if con is None:
+                con = k.GetConsoleWindow()
+            if not con:
+                return False
+            if self.u.GetForegroundWindow() == con:
+                return True
+            fg = self.u.GetForegroundWindow()
+            tid_me = k.GetCurrentThreadId()
+            tid_fg = ctypes.c_ulong(0)
+            self.u.GetWindowThreadProcessId(fg, ctypes.byref(tid_fg))
+            attached = False
+            if fg and tid_fg.value and tid_fg.value != tid_me:
+                attached = bool(self.u.AttachThreadInput(tid_me, tid_fg.value, True))
+            try:
+                self.u.BringWindowToTop(con)
+                self.u.SetForegroundWindow(con)
+            finally:
+                if attached:
+                    self.u.AttachThreadInput(tid_me, tid_fg.value, False)
+            if self.u.GetForegroundWindow() == con:
+                return True
+            # 前台锁定挡掉了：先模拟一次 Alt（系统会认为"用户刚按过键"）再试
+            VK_MENU = 0x12
+            self.u.keybd_event(VK_MENU, 0, 0, 0)
+            self.u.keybd_event(VK_MENU, 0, 0x0002, 0)
+            self.u.SetForegroundWindow(con)
+            return self.u.GetForegroundWindow() == con
+        except Exception:
             return False
 
     def move(self, pos):
@@ -1848,7 +2004,11 @@ def project(target, mode=MODE_BLOCK, ramp="ascii", use_256=False, real=False,
     cap = WindowCapture(hwnd, cols, rows, px_per_cell, capture)
     ctl = WindowControl(hwnd, cols, rows, real=real, real_quiet=real_quiet)
     ctl.refresh()
-    inp = ConsoleInput(ctl)
+    # 把自己这个控制台窗口的句柄交给输入层：滚轮要用它把窗口抢回前台，
+    # 这里取最可靠（本进程就是这个控制台的主人）。
+    inp = ConsoleInput(ctl, console_hwnd=ctypes.windll.kernel32.GetConsoleWindow())
+    # 移动事件的限速跟着投屏帧率走（见 ConsoleInput._emit_move）
+    inp.fps = fps
     input_ok = inp.start()
 
     # 输入线程一起步就该把控制台设成鼠标上报模式；这中间有个几十毫秒的窗口期，
