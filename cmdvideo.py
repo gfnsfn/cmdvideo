@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """cmdvideo —— 在 cmd / Windows 终端窗口里播放视频
 
@@ -27,7 +27,7 @@ import time
 APP = "cmdvideo"
 # 版本号：改这里，然后 README 的变更记录和 cmdvideo_setup.iss 里的
 # MyAppVersion 跟着一起改（发 Release 时对得上号）。
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 # 字符画模式的明暗阶梯（从最暗到最亮）。
 # 亮度算出来后按比例取其中一个字符，字符本身的"疏密"就在表现明暗。

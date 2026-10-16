@@ -8,7 +8,7 @@
 ;   4. 提供 .mp4/.mkv 等视频格式的「用 cmdvideo 打开」（可选）
 
 #define MyAppName "cmdvideo"
-#define MyAppVersion "1.8.0"
+#define MyAppVersion "1.8.1"
 #define MyAppPublisher "cmdvideo"
 #define MyAppExeName "cmdvideo.exe"
 
