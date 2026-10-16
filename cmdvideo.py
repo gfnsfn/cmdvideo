@@ -25,6 +25,9 @@ import threading
 import time
 
 APP = "cmdvideo"
+# 版本号：改这里，然后 README 的变更记录和 cmdvideo_setup.iss 里的
+# MyAppVersion 跟着一起改（发 Release 时对得上号）。
+__version__ = "1.7.0"
 
 # 字符画模式的明暗阶梯（从最暗到最亮）。
 # 亮度算出来后按比例取其中一个字符，字符本身的"疏密"就在表现明暗。
@@ -2507,6 +2510,7 @@ def main():
     ap.add_argument("--mute", action="store_true", help="不播声音")
     ap.add_argument("--stats", action="store_true", help="结束时打印统计")
     ap.add_argument("--check", action="store_true", help="只检查 ffmpeg 是否可用")
+    ap.add_argument("--version", action="store_true", help="打印版本号后退出")
     ap.add_argument("--list-windows", action="store_true",
                     help="列出所有可以投屏的窗口，然后退出")
     ap.add_argument("--window", default=None, metavar="关键字",
@@ -2521,6 +2525,12 @@ def main():
     ap.add_argument("--project-fps", type=float, default=None,
                     help="投屏的刷新帧率，默认 20")
     args, _unknown = ap.parse_known_args(argv[1:])
+
+    if args.version:
+        # exe 是 --windowed 打包的，不先接个控制台的话这里 print 出去谁也看不见
+        setup_output()
+        print("%s %s" % (APP, __version__))
+        return 0
 
     if args.list_windows:
         # 打包成 --windowed 的 exe 默认没有控制台，不先接一个的话

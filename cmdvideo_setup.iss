@@ -1,4 +1,4 @@
-; cmdvideo 安装包脚本（Inno Setup 6）
+﻿; cmdvideo 安装包脚本（Inno Setup 6）
 ; 编译：ISCC.exe cmdvideo_setup.iss
 ;
 ; 会做的事：
@@ -8,7 +8,7 @@
 ;   4. 提供 .mp4/.mkv 等视频格式的「用 cmdvideo 打开」（可选）
 
 #define MyAppName "cmdvideo"
-#define MyAppVersion "1.5"
+#define MyAppVersion "1.7.0"
 #define MyAppPublisher "cmdvideo"
 #define MyAppExeName "cmdvideo.exe"
 
