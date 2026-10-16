@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """cmdvideo —— 在 cmd / Windows 终端窗口里播放视频
 
@@ -996,6 +996,12 @@ WM_MOUSEWHEEL = 0x020A
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_CHAR = 0x0102
+WM_VSCROLL = 0x0115        # 经典滚动消息：投递 WM_MOUSEWHEEL 没人理时的兜底
+SB_LINEUP = 0
+SB_LINEDOWN = 1
+SB_VERT = 1
+SIF_ALL = 0x0017
+EM_GETSCROLLPOS = 0x04DD   # RichEdit/编辑类控件读滚动位置用
 
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
@@ -1040,6 +1046,30 @@ class _BITMAPINFO(ctypes.Structure):
 
 class _COORD(ctypes.Structure):
     _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+
+class _POINT(ctypes.Structure):
+    """屏幕坐标点。
+
+    必须和 _COORD 分开：`ClientToScreen` / `WindowFromPoint` 要的是 **POINT**
+    —— 两个 4 字节的 LONG。_COORD 是控制台 API 用的（两个 2 字节的 SHORT），
+    总共只有 4 字节，喂给 ClientToScreen 会**只写回 x、y 永远是 0**
+    （Windows 按 LONG 写 8 字节，越过结构体末尾），于是所有屏幕坐标的 y 全错：
+
+        实测 ClientToScreen(0,0) 用 _COORD 得到 (214, 0)，用 _POINT 才是 (214, 208)
+
+    y 错了之后滚轮会投给「屏幕上另一个位置的窗口」，而不是鼠标底下那个 ——
+    表现就是「滚轮没反应」，而且 PostMessage 还返回成功，极难看出来。
+    """
+
+    _fields_ = [("X", ctypes.c_long), ("Y", ctypes.c_long)]
+
+
+class _SCROLLINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("fMask", ctypes.c_uint),
+                ("nMin", ctypes.c_int), ("nMax", ctypes.c_int),
+                ("nPage", ctypes.c_uint), ("nPos", ctypes.c_int),
+                ("nTrackPos", ctypes.c_int)]
 
 
 class _KEY_EVENT_RECORD(ctypes.Structure):
@@ -1131,6 +1161,8 @@ def _declare_winapi():
         ("GetForegroundWindow", V, []),
         ("WindowFromPoint", V, [V]),
         ("GetParent", V, [V]),
+        ("ChildWindowFromPointEx", V, [V, V, U]),
+        ("GetParent", V, [V]),
         ("IsWindow", I, [V]),
         ("IsWindowVisible", I, [V]),
         ("IsIconic", I, [V]),
@@ -1180,6 +1212,32 @@ def _declare_winapi():
 
 
 _declare_winapi()
+
+# 结构体/句柄参数的补充声明。
+# ctypes 的默认推断很坑：没写 argtypes 时「整数」按 32 位 C int 处理，而 64 位
+# Windows 的 HWND 是 64 位指针值 —— 传进去会被**悄悄截断**，于是
+# GetParent / WindowFromPoint 拿到的句柄是错的、返回乱值或 NULL，
+# Python 这边看不出任何异常。滚轮「找鼠标底下那个子窗口」就栽在这上面。
+ctypes.windll.user32.WindowFromPoint.argtypes = [_POINT]     # 按值传 POINT
+ctypes.windll.user32.WindowFromPoint.restype = ctypes.c_void_p
+ctypes.windll.user32.GetParent.argtypes = [ctypes.c_void_p]
+ctypes.windll.user32.GetParent.restype = ctypes.c_void_p
+ctypes.windll.user32.IsWindow.argtypes = [ctypes.c_void_p]
+ctypes.windll.user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+ctypes.windll.user32.ChildWindowFromPointEx.argtypes = [
+    ctypes.c_void_p, _POINT, ctypes.c_uint]
+ctypes.windll.user32.ChildWindowFromPointEx.restype = ctypes.c_void_p
+ctypes.windll.user32.ScreenToClient.argtypes = [ctypes.c_void_p,
+                                                ctypes.POINTER(_POINT)]
+ctypes.windll.user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+ctypes.windll.user32.ClientToScreen.argtypes = [ctypes.c_void_p,
+                                                ctypes.POINTER(_POINT)]
+ctypes.windll.user32.GetScrollInfo.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                               ctypes.POINTER(_SCROLLINFO)]
+ctypes.windll.user32.GetScrollInfo.restype = ctypes.c_int
+ctypes.windll.user32.SendMessageW.restype = ctypes.c_long
+ctypes.windll.user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                              ctypes.c_void_p, ctypes.c_void_p]
 
 
 def _process_name(pid):
@@ -1388,7 +1446,7 @@ class WindowCapture:
         rc = _RECT()
         if not self.u.GetWindowRect(self.hwnd, ctypes.byref(rc)):
             return False
-        pt = _COORD(0, 0)
+        pt = _POINT(0, 0)
         self.u.ClientToScreen(self.hwnd, ctypes.byref(pt))
         hdc_screen = self.u.GetDC(None)
         try:
@@ -1533,23 +1591,6 @@ class ConsoleInput:
         elif rec.EventType == KEY_EVENT:
             self._on_key(rec.Event.KeyEvent)
 
-    def _wheel_log(self, delta, notches, pos):
-        """CMDVIDEO_DEBUG=1 时记录每次滚轮转发（排查滚轮问题用）。"""
-        if not os.environ.get("CMDVIDEO_DEBUG"):
-            return
-        try:
-            u = ctypes.windll.user32
-            con = self.console_hwnd
-            line = "wheel delta=%d notches=%d cell=%s console_fg=%s fg=%s con=%s\n" % (
-                delta, notches, pos,
-                bool(con) and u.GetForegroundWindow() == con,
-                u.GetForegroundWindow(), con)
-            with open(os.path.join(tempfile.gettempdir(), "cmdvideo_wheel.log"),
-                      "a", encoding="utf-8") as f:
-                f.write(line)
-        except Exception:
-            pass
-
     def _keep_focus(self):
         """滚动前确认投屏窗口还在前台。
 
@@ -1594,8 +1635,8 @@ class ConsoleInput:
             if notches:
                 self._wheel_acc -= notches * 120
                 self._keep_focus()
+                # 日志由 WindowControl 记（它才知道投给了哪个窗口、有没有兜底）
                 self.forward.wheel(pos, notches)
-                self._wheel_log(delta, notches, pos)
             return
         changed = btn ^ self._buttons
         self._buttons = btn
@@ -1708,6 +1749,10 @@ class WindowControl:
         self._down_buttons = 0
         # 接管形态专用：有没有键按着（只有拖拽时才跟着鼠标搬光标）。
         self._down = False
+        # 滚轮兜底：投递 WM_MOUSEWHEEL 没人理时，改用 WM_VSCROLL
+        self._scroll_prev = {}
+        self._last_wheel_hwnd = None
+        self._scroll_fix = False
 
     def refresh(self):
         self.u.GetClientRect(self.hwnd, ctypes.byref(self.rc))
@@ -1725,22 +1770,88 @@ class WindowControl:
         return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
 
     def _post(self, msg, wparam, lparam):
-        ok = self.u.PostMessageW(self.hwnd, msg, wparam, lparam)
+        return self._post_to(self.hwnd, msg, wparam, lparam)
+
+    def _post_to(self, hwnd, msg, wparam, lparam):
+        ok = self.u.PostMessageW(hwnd, msg, wparam, lparam)
         self.sent += 1
         if not ok and os.environ.get("CMDVIDEO_DEBUG"):
             try:
                 with open(os.path.join(tempfile.gettempdir(), "cmdvideo_events.log"),
                           "a", encoding="utf-8") as f:
                     f.write("POST FAILED msg=0x%x hwnd=%s err=%s\n"
-                            % (msg, self.hwnd, ctypes.get_last_error()))
+                            % (msg, hwnd, ctypes.get_last_error()))
             except Exception:
                 pass
         return ok
 
     def _to_screen(self, x, y):
-        pt = _COORD(x, y)
+        # 一定要用 _POINT（8 字节）而不是 _COORD（4 字节），见 _POINT 的注释
+        pt = _POINT(x, y)
         self.u.ClientToScreen(self.hwnd, ctypes.byref(pt))
         return pt.X, pt.Y
+
+    def _wheel_target(self, x, y):
+        """滚轮该投给谁：**目标窗口里鼠标位置最深的那个子窗口**。
+
+        为什么要往下找（两个实测出来的坑）：
+
+        1. `WM_MOUSEWHEEL` 和 `WM_LBUTTONDOWN` 不一样，**不会沿着窗口层级
+           往下转发**。记事本这类程序真正处理滚动的是一层子窗口（编辑区），
+           顶层窗口收到滚动消息就那么晾着 —— 现象是「点击有反应、滚轮纹丝不动」，
+           而日志里显示「消息已成功投递」，特别容易误判成没发出去。
+        2. **不能靠 WindowFromPoint 找**：投屏窗口是最大化的、还常在最前面，
+           那个 API 返回的是「屏幕上最顶上那个窗口」，也就是投屏窗口自己，
+           永远指不到目标的子窗口。所以必须沿着**目标窗口自己的层级**往下走
+           （ChildWindowFromPointEx），跟谁盖在上面无关。
+
+        爬不到子窗口（目标就是个没有子窗口的壳）就退回顶层窗口。
+        """
+        try:
+            CWP_SKIPINVISIBLE = 0x0001
+            CWP_SKIPDISABLED = 0x0002
+            pt = _POINT(x, y)                    # 客户区坐标，逐层往下换算
+            node = self.hwnd
+            for _ in range(16):
+                child = self.u.ChildWindowFromPointEx(
+                    node, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED)
+                if not child or child == node:
+                    break
+                # 换成子窗口自己的客户区坐标，继续往下钻
+                scr = _POINT(pt.X, pt.Y)
+                self.u.ClientToScreen(node, ctypes.byref(scr))
+                self.u.ScreenToClient(child, ctypes.byref(scr))
+                pt = _POINT(scr.X, scr.Y)
+                node = child
+            return node
+        except Exception:
+            return self.hwnd
+
+    def _wheel_log(self, delta, notches, pos, extra=""):
+        """每次滚轮都记一笔，供排查「投屏时滚轮不灵」用。
+
+        故意**不**放在 CMDVIDEO_DEBUG 后面：滚轮问题只在真机上复现得出来，
+        等用户配好环境变量再让他重试一轮太折腾。日志很小（一次滚动几十行），
+        出问题直接看 %TEMP%\\cmdvideo_wheel.log 就够了。
+
+        两类行：
+          - raw     每个原始事件（delta 可能不足一格）→ 看出是不是平滑滚轮的
+                    高精度增量（±30/±60），以及控制台到底有没有上报滚轮
+          - FORWARD 攒够一格真正转发的那次 → 看出格数、投给了哪个窗口、
+                    PostMessage 的返回值
+        """
+        try:
+            u = ctypes.windll.user32
+            with open(os.path.join(tempfile.gettempdir(), "cmdvideo_wheel.log"),
+                      "a", encoding="utf-8") as f:
+                f.write("%.3f raw   delta=%-6d cell=%-9s fg_target=%s hwnd=%s\n"
+                        % (time.time(), delta, pos,
+                           u.GetForegroundWindow() == self.hwnd, self.hwnd))
+                if notches:
+                    f.write("%.3f FORWARD notches=%-4d cell=%-9s %s\n"
+                            % (time.time(), notches, pos, extra))
+        except Exception:
+            pass
 
     def _trace(self, text):
         """CMDVIDEO_DEBUG=1 时把真实操控的关键步骤写到临时文件里，方便排障。"""
@@ -1937,10 +2048,58 @@ class WindowControl:
             self.u.mouse_event(0x0800, 0, 0, delta & 0xFFFFFFFF, 0)   # MOUSEEVENTF_WHEEL
             self.sent += 1
             return
-        # WM_MOUSEWHEEL 的 lParam 用的是**屏幕坐标**，和别的鼠标消息不一样
+        # WM_MOUSEWHEEL 的 lParam 用的是**屏幕坐标**，和别的鼠标消息不一样。
+        # 目标也不是顶层窗口，而是鼠标底下那个子窗口 —— 滚动消息不会往下转发，
+        # 投错窗口就成了「点击有反应、滚轮没反应」。
         sx, sy = self._to_screen(x, y)
-        self._post(WM_MOUSEWHEEL, (delta & 0xFFFF) << 16,
-                   self._lparam(sx, sy))
+        tgt = self._wheel_target(x, y)
+        ok = self._post_to(tgt, WM_MOUSEWHEEL,
+                           (delta & 0xFFFF) << 16, self._lparam(sx, sy))
+        # 有些现代控件（记事本的 RichEditD2DPT、部分 WinUI 控件）**完全不认
+        # 投递过来的 WM_MOUSEWHEEL**：post 返回 1、日志一切正常，画面纹丝不动
+        # （实测确认）。判定办法是看滚动位置有没有动；没动就补发 WM_VSCROLL
+        # —— 那个是经典滚动消息，真正的滚动条控件都认，而且**不用碰系统光标**。
+        moved = self._scroll_moved(tgt)
+        if moved is False and tgt == self._last_wheel_hwnd and not self._scroll_fix:
+            self._scroll_fix = True
+        if self._scroll_fix:
+            self._post_to(tgt, WM_VSCROLL,
+                          (SB_LINEUP if delta > 0 else SB_LINEDOWN), 0)
+        self._last_wheel_hwnd = tgt
+        self._wheel_log(delta, notches, pos,
+                        extra="target=%d%s post=%s scroll_moved=%s vscroll_fix=%s"
+                        % (tgt, "" if tgt == self.hwnd else " (child)", ok,
+                           moved, self._scroll_fix))
+
+    def _scroll_pos(self, hwnd):
+        """读窗口的垂直滚动位置（读不到返回 None）。"""
+        try:
+            si = _SCROLLINFO()
+            si.cbSize = ctypes.sizeof(_SCROLLINFO)
+            si.fMask = SIF_ALL
+            if self.u.GetScrollInfo(hwnd, SB_VERT, ctypes.byref(si)):
+                return si.nPos
+            # 编辑类控件（记事本那种）走这个
+            p = _POINT(0, 0)
+            r = self.u.SendMessageW(hwnd, EM_GETSCROLLPOS, 0, ctypes.byref(p))
+            if r:
+                return (p.X, p.Y)
+        except Exception:
+            pass
+        return None
+
+    def _scroll_moved(self, hwnd):
+        """和这个窗口上次记录的滚动位置比一比。
+
+        返回 True=动了 / False=没动 / None=读不到（读不到就别乱判，
+        当成「可能有效」，免得对浏览器这类程序平白多做动作）。
+        """
+        cur = self._scroll_pos(hwnd)
+        prev = self._scroll_prev.get(hwnd)
+        self._scroll_prev[hwnd] = cur
+        if cur is None or prev is None:
+            return None
+        return cur != prev
 
     def key(self, vk, scan, down, ch, ctrl):
         if self.real and not self.real_quiet:
