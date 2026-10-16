@@ -6,7 +6,16 @@
 2. **投屏窗口** —— 把系统里**任意一个正在运行的程序窗口**搬进 cmd 里用彩色字符画
    显示，而且能用鼠标和键盘**操控那个程序**。
 
-**已经装好了**，从**开始菜单**搜 `cmdvideo` 就能打开（桌面也有快捷方式）。
+**下载**：到 [Releases](https://github.com/gfnsfn/cmdvideo/releases/latest) 拿现成的
+
+| 文件 | 说明 |
+|---|---|
+| **cmdvideo_setup.exe** | **推荐**。一键安装，`ffmpeg.exe` 一起装好，装到当前用户目录、不需要管理员 |
+| cmdvideo.exe | 免安装单文件。**要放视频就得把 `ffmpeg.exe` 放在它旁边**（投屏不需要） |
+| ffmpeg.exe | 上面那个单文件版缺的就是它（87 MB，官方 Windows 构建） |
+| SHA256SUMS.txt | 校验值 |
+
+单文件版没有 `ffmpeg.exe` 时，点「开始播放」会直接弹窗告诉你缺什么 —— 不会静默失败。
 
 ---
 
